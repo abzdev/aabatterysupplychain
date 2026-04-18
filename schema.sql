@@ -292,6 +292,7 @@ create table sku_dc_features (
 
 create table events (
   id                      bigserial primary key,
+  event_key               text             not null unique,
   sku_id                  varchar(20)      not null,
   source_dc               dc_code          not null,
   dest_dc                 dc_code          not null,
@@ -494,6 +495,9 @@ create index idx_chargebacks_customer
 
 create index idx_events_state
   on events (state);
+
+create index idx_events_days_of_supply
+  on events (days_of_supply);
 
 create index idx_events_dest_dc
   on events (dest_dc);
