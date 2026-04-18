@@ -36,12 +36,14 @@ HASH_KEYED_TABLES = {
     "po_history",
     "chargebacks",
     "transfer_cost_history",
+    "penalty_history",
 }
 ALL_TARGETS = [
     "inventory_snapshots",
     "sales_history",
     "po_history",
     "chargebacks",
+    "penalty_history",
     "transfer_cost_history",
     "transfer_cost_lookup",
     "lead_time_lookup",
@@ -51,6 +53,15 @@ ALL_TARGETS = [
 
 def _strip_text(series: pd.Series) -> pd.Series:
     return series.astype("string").str.strip()
+
+
+def _null_if_too_long(series: pd.Series, max_length: int) -> pd.Series:
+    return series.where(series.str.len().le(max_length) | series.isna(), None)
+
+
+def _normalize_state(series: pd.Series) -> pd.Series:
+    cleaned = _strip_text(series).str.upper()
+    return _null_if_too_long(cleaned, 2)
 
 
 def _to_nullable_int(series: pd.Series) -> pd.Series:
@@ -80,13 +91,29 @@ def _series_to_hashable_strings(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("")
 
 
-def _add_source_row_hash(df: pd.DataFrame, key_columns: Iterable[str] | None = None) -> pd.DataFrame:
+def _add_source_row_hash(
+    df: pd.DataFrame,
+    key_columns: Iterable[str] | None = None,
+    *,
+    dedupe_label: str | None = None,
+) -> pd.DataFrame:
     columns = list(key_columns or df.columns)
     hash_input = pd.DataFrame({column: _series_to_hashable_strings(df[column]) for column in columns})
     row_strings = hash_input.agg("\x1f".join, axis=1)
     out = df.copy()
     out["source_row_hash"] = row_strings.map(lambda value: hashlib.sha256(value.encode("utf-8")).hexdigest())
-    return out.drop_duplicates(subset=["source_row_hash"]).copy()
+    dup_mask = out["source_row_hash"].duplicated(keep=False)
+    duplicate_row_count = int(dup_mask.sum())
+    before_len = len(out)
+    unique_dup_hashes = int(out.loc[dup_mask, "source_row_hash"].nunique()) if duplicate_row_count else 0
+    out = out.drop_duplicates(subset=["source_row_hash"]).copy()
+    if duplicate_row_count:
+        prefix = f"{dedupe_label}: " if dedupe_label else ""
+        print(
+            f"{prefix}dedupe: {duplicate_row_count} rows share {unique_dup_hashes} duplicate "
+            f"source_row_hash value(s); kept first occurrence per hash ({before_len} -> {len(out)} rows)."
+        )
+    return out
 
 
 def _prepare_records(df: pd.DataFrame) -> list[dict]:
@@ -120,10 +147,22 @@ def _write_batches(
 
     client = _create_client()
     on_conflict = ",".join(conflict_columns) if conflict_columns else None
+    conflict_cols = on_conflict.split(",") if on_conflict else []
 
     for start in range(0, len(records), batch_size):
         batch = records[start : start + batch_size]
         print(f"{table_name}: uploading rows {start}..{start + len(batch) - 1}")
+        if on_conflict:
+            key_counts: dict[tuple, int] = {}
+            for record in batch:
+                key = tuple(record.get(column) for column in conflict_cols)
+                key_counts[key] = key_counts.get(key, 0) + 1
+            dup_keys = sum(1 for _key, count in key_counts.items() if count > 1)
+            if dup_keys:
+                print(
+                    f"{table_name}: warning: batch at offset {start} contains {dup_keys} "
+                    f"duplicate upsert key(s) on ({on_conflict}); same batch may error in Postgres."
+                )
         try:
             if on_conflict:
                 client.table(table_name).upsert(batch, on_conflict=on_conflict).execute()
@@ -131,7 +170,10 @@ def _write_batches(
                 client.table(table_name).insert(batch).execute()
         except APIError as err:
             if on_conflict and _is_duplicate_unique_constraint_error(err):
-                print(f"Ignoring duplicate-key batch error at offset {start}: {err}")
+                print(
+                    f"{table_name}: duplicate-key conflict while upserting batch at offset {start} "
+                    f"on ({on_conflict}); treating as idempotent skip. Detail: {err}"
+                )
                 continue
             raise
 
@@ -186,7 +228,7 @@ def load_sales_history(path: Path = SALES_PATH) -> pd.DataFrame:
             "salesperson_id": _strip_text(df["SLPRSNID"]),
             "customer_number": _strip_text(df["CUSTNMBR"]),
             "city": _strip_text(df["CITY"]),
-            "state": _strip_text(df["STATE"]),
+            "state": _normalize_state(df["STATE"]),
             "sop_number": _strip_text(df["SOPNUMBE"]),
             "doc_date": _to_iso_date(df["DOCDATE"]),
             "sku_id": _strip_text(df["ITEMNMBR"]),
@@ -203,7 +245,7 @@ def load_sales_history(path: Path = SALES_PATH) -> pd.DataFrame:
             "unit_price_adj": _to_nullable_float(df["Unit_Price_adj"], 4),
         }
     )
-    return _add_source_row_hash(out)
+    return _add_source_row_hash(out, dedupe_label="sales_history")
 
 
 def _load_po_source(path: Path = PO_PATH) -> pd.DataFrame:
@@ -259,7 +301,8 @@ def load_po_history(path: Path = PO_PATH) -> pd.DataFrame:
                 "ship_to_address",
                 "shipping_method",
             ]
-        ]
+        ],
+        dedupe_label="po_history",
     )
 
 
@@ -274,7 +317,7 @@ def load_chargebacks(path: Path = CHARGEBACKS_PATH) -> pd.DataFrame:
             "salesperson_id": _strip_text(df["Salesperson ID"]),
             "customer_number": _strip_text(df["Customer Number"]),
             "city": _strip_text(df["City from Sales Transaction"]),
-            "state": _strip_text(df["State from Sales Transaction"]),
+            "state": _normalize_state(df["State from Sales Transaction"]),
             "sop_type": _strip_text(df["SOP Type"]),
             "sop_number": _strip_text(df["SOP Number"]),
             "customer_po_number": _strip_text(df["Customer PO Number"]),
@@ -285,7 +328,7 @@ def load_chargebacks(path: Path = CHARGEBACKS_PATH) -> pd.DataFrame:
             "extended_price": _to_nullable_float(df["Extended Price"], 2),
         }
     )
-    return _add_source_row_hash(out)
+    return _add_source_row_hash(out, dedupe_label="chargebacks")
 
 
 def load_transfer_cost_history(path: Path = CHARGEBACKS_PATH) -> pd.DataFrame:
@@ -302,7 +345,29 @@ def load_transfer_cost_history(path: Path = CHARGEBACKS_PATH) -> pd.DataFrame:
             "reference": _strip_text(df["Reference"]),
         }
     )
-    return _add_source_row_hash(out)
+    return _add_source_row_hash(out, dedupe_label="transfer_cost_history")
+
+
+def load_penalty_history(path: Path = CHARGEBACKS_PATH) -> pd.DataFrame:
+    df = pd.read_excel(path, sheet_name="Data-Penalty", dtype=object)
+    out = pd.DataFrame(
+        {
+            "salesperson_id": _strip_text(df["Salesperson ID"]),
+            "customer_number": _strip_text(df["Customer Number"]),
+            "customer_name": _strip_text(df["Customer Name"]),
+            "city": _strip_text(df["City from Sales Transaction"]),
+            "state": _normalize_state(df["State from Sales Transaction"]),
+            "sop_number": _strip_text(df["SOP Number"]),
+            "doc_date": _to_iso_date(df["Document Date"]),
+            "sku_id": _strip_text(df["Item Number"]),
+            "item_description": _strip_text(df["Item Description"]),
+            "qty": _to_nullable_float(df["QTY"], 2),
+            "uom": _strip_text(df["U Of M"]),
+            "extended_price": _to_nullable_float(df["Extended Price"], 2),
+            "market": _strip_text(df["MARKET"]),
+        }
+    )
+    return _add_source_row_hash(out, dedupe_label="penalty_history")
 
 
 def derive_transfer_cost_lookup(history_df: pd.DataFrame) -> pd.DataFrame:
@@ -380,6 +445,9 @@ def build_datasets(targets: set[str]) -> dict[str, pd.DataFrame]:
     if "chargebacks" in targets:
         datasets["chargebacks"] = load_chargebacks()
 
+    if "penalty_history" in targets:
+        datasets["penalty_history"] = load_penalty_history()
+
     transfer_cost_history_df: pd.DataFrame | None = None
     if {"transfer_cost_history", "transfer_cost_lookup"} & targets:
         transfer_cost_history_df = load_transfer_cost_history()
@@ -395,6 +463,15 @@ def build_datasets(targets: set[str]) -> dict[str, pd.DataFrame]:
             datasets["lead_time_lookup"] = derive_lead_time_lookup()
 
     return datasets
+
+
+def _count_open_po_rows(path: Path = PO_PATH) -> int:
+    """Match open_po_history view: receipt_date is null or strictly after today."""
+    df = _load_po_source(path)
+    receipt = df["receipt_date"]
+    today = pd.Timestamp(date.today())
+    mask = receipt.isna() | (receipt > today)
+    return int(mask.sum())
 
 
 def write_dataset(table_name: str, df: pd.DataFrame) -> None:
@@ -415,6 +492,13 @@ def write_dataset(table_name: str, df: pd.DataFrame) -> None:
 def run_targets(targets: Iterable[str], *, dry_run: bool = False) -> None:
     target_set = set(targets)
     datasets = build_datasets(target_set)
+
+    if "po_history" in target_set:
+        open_po_count = _count_open_po_rows()
+        print(
+            "open_po_history is a database view over po_history (not ingested directly). "
+            f"Rows that would appear as open today: {open_po_count}."
+        )
 
     for table_name in ALL_TARGETS:
         if table_name not in target_set:

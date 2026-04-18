@@ -446,7 +446,8 @@ select
   is_open,
   created_at,
   (receipt_date is null or receipt_date > current_date) as is_currently_open
-from po_history;
+from po_history
+where receipt_date is null or receipt_date > current_date;
 
 -- ------------------------------------------------------------
 -- Indexes
