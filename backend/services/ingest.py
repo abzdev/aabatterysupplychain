@@ -1,9 +1,11 @@
-import pandas as pd
-from supabase import create_client
 import os
 from datetime import date
 from pathlib import Path
+
+import pandas as pd
 from dotenv import load_dotenv
+from postgrest.exceptions import APIError
+from supabase import create_client
 
 load_dotenv()
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -18,6 +20,7 @@ SHEET_MAP = {
     "Site 3 - LA": "LA",
 }
 
+
 def load_inventory_snapshots(path: str) -> pd.DataFrame:
     sheets = pd.read_excel(path, sheet_name=list(SHEET_MAP.keys()), dtype=str)
     frames = []
@@ -28,14 +31,25 @@ def load_inventory_snapshots(path: str) -> pd.DataFrame:
         df["dc"] = dc_value
         frames.append(df)
     out = pd.concat(frames, ignore_index=True)
-    out = out.rename(columns={"Item Number": "sku_id",
-                              "Description": "description", 
-                              "Available": "available", 
-                              "On Hand": "on_hand"
-    })
+    out = out.rename(
+        columns={
+            "Item Number": "sku_id",
+            "Description": "description",
+            "Available": "available",
+            "On Hand": "on_hand",
+        }
+    )
     out["snapshot_date"] = date.today().isoformat()
     return out
 
+
+def _is_duplicate_unique_constraint_error(err: APIError) -> bool:
+    message = ""
+    if err.args and isinstance(err.args[0], dict):
+        message = str(err.args[0].get("message", "") or "")
+    if not message:
+        message = str(getattr(err, "message", "") or "")
+    return message.startswith("duplicate key value violates unique constraint")
 
 
 def upload_to_supabase(df: pd.DataFrame):
@@ -50,8 +64,15 @@ def upload_to_supabase(df: pd.DataFrame):
         print("batch number: ", i)
         print("batch size: ", len(batch))
         print("--------------------------------")
-        client.table(TABLE_NAME).upsert(batch).execute()
+        try:
+            client.table(TABLE_NAME).upsert(batch).execute()
+        except APIError as err:
+            if _is_duplicate_unique_constraint_error(err):
+                print(f"Ignoring duplicate-key batch error at offset {i}: {err}")
+                continue
+            raise
     print(f"Uploaded {len(records)} rows to '{TABLE_NAME}'.")
+
 
 if __name__ == "__main__":
     df = load_inventory_snapshots(XLSX_PATH)
