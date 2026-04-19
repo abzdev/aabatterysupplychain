@@ -9,14 +9,15 @@ T4 Imbalance agent:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
+from time import perf_counter
 from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
+from postgrest.base_request_builder import ReturnMethod
 from supabase import Client, create_client
 
 from .demand_agent import DemandAgent, DemandAgentConfig
@@ -65,6 +66,34 @@ def _normalize_projection(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return value
     return []
+
+
+def _normalize_record_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _records_for_upsert(events_df: pd.DataFrame) -> list[dict[str, Any]]:
+    integer_fields = {"transferable_qty", "network_total", "relief_qty"}
+    records: list[dict[str, Any]] = []
+    for row in events_df.to_dict(orient="records"):
+        normalized: dict[str, Any] = {}
+        for key, value in row.items():
+            cleaned = _normalize_record_value(value)
+            if key in integer_fields and cleaned is not None:
+                normalized[key] = int(float(cleaned))
+            else:
+                normalized[key] = cleaned
+        records.append(normalized)
+    return records
 
 
 @dataclass
@@ -321,12 +350,25 @@ class ImbalanceAgent:
             print("imbalance_agent: no events to upsert.")
             return
 
-        records = json.loads(events_df.to_json(orient="records"))
+        records = _records_for_upsert(events_df)
         batch_size = 500
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            print(f"imbalance_agent: upserting rows {start}..{start + len(batch) - 1}")
-            self.client.table("events").upsert(batch, on_conflict="event_key").execute()
+            batch_started_at = perf_counter()
+            print(
+                "imbalance_agent: upserting rows "
+                f"{start}..{start + len(batch) - 1} batch_size={len(batch)}"
+            )
+            self.client.table("events").upsert(
+                batch,
+                on_conflict="event_key",
+                returning=ReturnMethod.minimal,
+            ).execute()
+            batch_elapsed_ms = round((perf_counter() - batch_started_at) * 1000)
+            print(
+                "imbalance_agent: upsert batch complete "
+                f"rows {start}..{start + len(batch) - 1} elapsed_ms={batch_elapsed_ms}"
+            )
         print(f"imbalance_agent: upserted {len(records)} event rows.")
 
 

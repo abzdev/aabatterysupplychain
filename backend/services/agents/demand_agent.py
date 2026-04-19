@@ -6,14 +6,15 @@ rank by `days_of_supply` ascending, and upsert `events` rows with a 61-point dep
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from time import perf_counter
 from typing import Any, Iterable
 
 import pandas as pd
 from dotenv import load_dotenv
+from postgrest.base_request_builder import ReturnMethod
 from supabase import Client, create_client
 
 load_dotenv()
@@ -69,6 +70,26 @@ def _build_projection(available: float, daily_demand: float, horizon_days: int) 
     for day in range(0, horizon_days + 1):
         projection.append({"day": float(day), "available": float(available - day * daily_demand)})
     return projection
+
+
+def _normalize_record_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _records_for_upsert(events_df: pd.DataFrame) -> list[dict[str, Any]]:
+    return [
+        {key: _normalize_record_value(value) for key, value in row.items()}
+        for row in events_df.to_dict(orient="records")
+    ]
 
 
 def _sales_units(row: dict[str, Any]) -> float:
@@ -310,12 +331,25 @@ class DemandAgent:
             print("demand_agent: no events to upsert.")
             return
 
-        records = json.loads(events_df.to_json(orient="records"))
+        records = _records_for_upsert(events_df)
         batch_size = 500
         for start in range(0, len(records), batch_size):
             batch = records[start : start + batch_size]
-            print(f"demand_agent: upserting events rows {start}..{start + len(batch) - 1}")
-            self.client.table("events").upsert(batch, on_conflict="event_key").execute()
+            batch_started_at = perf_counter()
+            print(
+                "demand_agent: upserting events rows "
+                f"{start}..{start + len(batch) - 1} batch_size={len(batch)}"
+            )
+            self.client.table("events").upsert(
+                batch,
+                on_conflict="event_key",
+                returning=ReturnMethod.minimal,
+            ).execute()
+            batch_elapsed_ms = round((perf_counter() - batch_started_at) * 1000)
+            print(
+                "demand_agent: upsert batch complete "
+                f"rows {start}..{start + len(batch) - 1} elapsed_ms={batch_elapsed_ms}"
+            )
 
         print(f"demand_agent: upserted {len(records)} events rows.")
 

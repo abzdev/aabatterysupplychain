@@ -10,6 +10,8 @@ from supabase import Client, create_client
 RISK_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
 EVENT_ENTITY_TYPE = "event"
 TRANSFER_REQUEST_ENTITY_TYPE = "transfer_request"
+LOCATION_CODE_TO_DC = {1: "SF", 2: "NJ", 3: "LA"}
+OPERATIONAL_CHARGEBACK_CAUSE_CODES = {"CRED11-F", "CRED11-O", "CRED08", "CRED12"}
 
 
 class WorkflowError(Exception):
@@ -94,6 +96,100 @@ def _to_date_str(value: Any) -> str | None:
     if "T" in text:
         text = text.split("T", 1)[0]
     return text[:10]
+
+
+def _normalize_lookup_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).strip().upper().split())
+    return text or None
+
+
+def _avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _build_sku_description_lookup(client: Client) -> dict[str, set[str]]:
+    lookup: dict[str, set[str]] = {}
+
+    def add_rows(rows: list[dict[str, Any]], *, description_field: str) -> None:
+        for row in rows:
+            sku_id = str(row.get("sku_id") or "").strip()
+            description = _normalize_lookup_text(row.get(description_field))
+            if not sku_id or description is None:
+                continue
+            lookup.setdefault(sku_id, set()).add(description)
+
+    add_rows(_fetch_all_rows(client, "inventory_snapshots", select="sku_id,description"), description_field="description")
+    add_rows(_fetch_all_rows(client, "sales_history", select="sku_id,item_desc"), description_field="item_desc")
+    add_rows(_fetch_all_rows(client, "po_history", select="sku_id,item_description"), description_field="item_description")
+    add_rows(_fetch_all_rows(client, "penalty_history", select="sku_id,item_description"), description_field="item_description")
+    return lookup
+
+
+def _manual_chargeback_baselines(
+    client: Client,
+    events: list[dict[str, Any]],
+) -> tuple[dict[int, float], dict[int, str]]:
+    sku_descriptions = _build_sku_description_lookup(client)
+    desc_to_skus: dict[str, set[str]] = {}
+    for sku_id, descriptions in sku_descriptions.items():
+        for description in descriptions:
+            desc_to_skus.setdefault(description, set()).add(sku_id)
+
+    sku_dc_costs: dict[tuple[str, str], list[float]] = {}
+    sku_costs: dict[str, list[float]] = {}
+    dc_costs: dict[str, list[float]] = {}
+    global_costs: list[float] = []
+
+    chargeback_rows = _fetch_all_rows(
+        client,
+        "chargebacks",
+        select="location_code,cause_code,item_description,extended_price",
+    )
+    for row in chargeback_rows:
+        cause_code = str(row.get("cause_code") or "").strip()
+        if cause_code not in OPERATIONAL_CHARGEBACK_CAUSE_CODES:
+            continue
+        chargeback_cost = _to_float(row.get("extended_price"))
+        if chargeback_cost is None or chargeback_cost <= 0:
+            continue
+        description = _normalize_lookup_text(row.get("item_description"))
+        if description is None:
+            continue
+        dc = LOCATION_CODE_TO_DC.get(_to_int(row.get("location_code")))
+        global_costs.append(chargeback_cost)
+        if dc is not None:
+            dc_costs.setdefault(dc, []).append(chargeback_cost)
+        for sku_id in desc_to_skus.get(description, set()):
+            sku_costs.setdefault(sku_id, []).append(chargeback_cost)
+            if dc is not None:
+                sku_dc_costs.setdefault((sku_id, dc), []).append(chargeback_cost)
+
+    global_avg = _avg(global_costs) or 0.0
+    manual_costs: dict[int, float] = {}
+    manual_basis: dict[int, str] = {}
+    for event in events:
+        sku_id = event["sku_id"]
+        dest_dc = event["dest_dc"]
+        sku_dc_avg = _avg(sku_dc_costs.get((sku_id, dest_dc), []))
+        sku_avg = _avg(sku_costs.get(sku_id, []))
+        dc_avg = _avg(dc_costs.get(dest_dc, []))
+        if sku_dc_avg is not None:
+            manual_costs[event["id"]] = float(sku_dc_avg)
+            manual_basis[event["id"]] = "actual_chargebacks_sku_dc"
+        elif sku_avg is not None:
+            manual_costs[event["id"]] = float(sku_avg)
+            manual_basis[event["id"]] = "actual_chargebacks_sku"
+        elif dc_avg is not None:
+            manual_costs[event["id"]] = float(dc_avg)
+            manual_basis[event["id"]] = "actual_chargebacks_dc"
+        else:
+            manual_costs[event["id"]] = float(global_avg)
+            manual_basis[event["id"]] = "actual_chargebacks_global"
+    return manual_costs, manual_basis
 
 
 def _normalize_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -592,6 +688,7 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
     events = [_normalize_event(row) for row in _fetch_all_rows(client, "events")]
     transfer_requests = [_normalize_transfer_request(row) for row in _fetch_all_rows(client, "transfer_requests")]
     audit_rows = [_normalize_audit_entry(row) for row in _fetch_all_rows(client, "audit_log")]
+    manual_cost_by_event, manual_basis_by_event = _manual_chargeback_baselines(client, events)
 
     request_by_event: dict[int, dict[str, Any]] = {}
     for request in transfer_requests:
@@ -613,7 +710,7 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
     approval_hours: list[float] = []
     for event in events:
         request = request_by_event.get(event["id"])
-        manual_cost = float(event.get("cost_wait") or event.get("expected_penalty_cost") or 0)
+        manual_cost = float(manual_cost_by_event.get(event["id"]) or 0)
         if request and request["state"] in {"PENDING_APPROVAL", "APPROVED", "EXECUTED"}:
             system_action = "TRANSFER"
             system_cost = float(request.get("estimated_cost") or event.get("cost_transfer") or 0)
@@ -646,6 +743,7 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
                 "system_cost": system_cost,
                 "delta_vs_manual": manual_cost - system_cost,
                 "request_state": request.get("state") if request else None,
+                "manual_cost_basis": manual_basis_by_event.get(event["id"]),
             }
         )
 
@@ -671,8 +769,9 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
         "ai_coverage_rate": (ai_covered / event_count) if event_count else None,
     }
     assumptions = [
-        "Manual baseline assumes teams wait for inbound relief and absorb the modeled wait cost on each event.",
+        "Manual baseline is derived from actual operational chargeback history for the detected SKUs and destination DCs, with fallbacks to SKU-, DC-, or portfolio-level operational chargeback averages when direct matches are sparse.",
         "System-assisted cost uses the latest transfer request estimate when a request exists; otherwise it uses the current recommended action on the event.",
+        "The manual baseline is conservative: it excludes hidden manual-process costs such as emergency split-ship freight, OTIF score degradation, and labor spent disputing chargebacks later.",
         "Manual approval time is shown as a 24-hour operating assumption because the current schema does not track a true manual workflow baseline.",
     ]
     return {"summary": summary, "assumptions": assumptions, "rows": rows}

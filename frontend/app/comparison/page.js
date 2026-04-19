@@ -70,7 +70,10 @@ export default function ComparisonPage() {
               {summary ? fmtMoney(summary.manual_baseline_cost) : '—'}
             </div>
             <div className="mt-2 text-sm text-[hsl(var(--app-text-soft))]">
-              Modeled portfolio cost if teams absorb wait costs instead of system-ranked intervention.
+              Historical operational chargeback baseline for the detected SKUs and destination DCs.
+            </div>
+            <div className="mt-2 text-xs text-[hsl(var(--app-text-muted))]">
+              Conservative view only: excludes hidden manual costs like emergency freight, OTIF degradation, and dispute labor.
             </div>
           </div>
           <div className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors">
@@ -98,7 +101,7 @@ export default function ComparisonPage() {
             <div>
               <h2 className="text-sm uppercase tracking-[0.18em] text-[hsl(var(--app-text-muted))]">Assumptions</h2>
               <p className="mt-1 text-sm text-[hsl(var(--app-text-soft))]">
-                The comparison uses current event and transfer-request data, plus one explicit operating assumption for manual approval timing.
+                The comparison uses current event and transfer-request data, historical operational chargebacks, and one explicit operating assumption for manual approval timing.
               </p>
             </div>
             <div className="mono rounded-full bg-secondary px-3 py-1 text-[11px] tracking-widest text-[hsl(var(--app-text-soft))]">

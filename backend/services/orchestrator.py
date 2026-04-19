@@ -52,6 +52,8 @@ You MUST respond with a single JSON object and nothing else—no markdown fences
 
 Rules:
 - action TRANSFER: favor when transferable_qty supports moving stock and penalty/DoS risk justifies the move.
+- Only recommend TRANSFER when transfer_cost < expected_penalty_cost.
+- If transfer_cost exceeds expected_penalty_cost, recommend WAIT or MONITOR unless there is a material OTIF or customer-relationship factor that clearly overrides the math; if you use such an override, say so explicitly in reasoning.
 - action WAIT: favor when relief is timely and sufficient, or when transfer cost outweighs benefit.
 - action MONITOR: favor when information is insufficient or situation is borderline; keep reasoning explicit.
 - cost_transfer and cost_wait must be non-negative floats (USD). They are your quantitative comparison of the two strategies for this event.
@@ -255,6 +257,27 @@ def _map_action_to_db(action: str) -> str:
     return "MONITOR"
 
 
+def _enforce_transfer_cost_guardrail(
+    *,
+    action: str,
+    confidence_db: str,
+    reasoning: str,
+    cost_transfer: float,
+    expected_penalty_cost: float | None,
+) -> tuple[str, str, str]:
+    if action != "TRANSFER" or expected_penalty_cost is None:
+        return action, confidence_db, reasoning
+    if cost_transfer < expected_penalty_cost:
+        return action, confidence_db, reasoning
+    guardrail_reasoning = (
+        "Transfer recommendation was overridden because modeled transfer cost exceeds expected penalty cost, "
+        "and no quantified OTIF or relationship override is available in the event payload."
+    )
+    if reasoning:
+        guardrail_reasoning = f"{reasoning} {guardrail_reasoning}"
+    return "WAIT", confidence_db, guardrail_reasoning
+
+
 def _fallback_reasoning(event: dict[str, Any], exc: Exception) -> str:
     base_reasoning = str(event.get("reasoning") or "").strip()
     failure_detail = str(exc).strip() or "AI provider unavailable."
@@ -352,6 +375,20 @@ def analyze_event(event_id: int, *, client: Client | None = None, actor: str = "
     cost_wait = float(parsed.get("cost_wait", 0) or 0)
     reasoning = str(parsed.get("reasoning") or "").strip()
     confidence_db = apply_cost_proximity_confidence_override(cost_transfer, cost_wait, confidence_db)
+    original_action = action
+    action, confidence_db, reasoning = _enforce_transfer_cost_guardrail(
+        action=action,
+        confidence_db=confidence_db,
+        reasoning=reasoning,
+        cost_transfer=cost_transfer,
+        expected_penalty_cost=_num_or_none(payload.get("expected_penalty_cost")),
+    )
+    if original_action != action:
+        print(
+            "orchestrator: transfer guardrail override "
+            f"event_id={event_id} from={original_action} to={action} "
+            f"cost_transfer={cost_transfer} expected_penalty_cost={payload.get('expected_penalty_cost')}"
+        )
 
     updated_event = transition_event_state(
         own_client,
