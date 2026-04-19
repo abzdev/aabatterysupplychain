@@ -9,6 +9,8 @@
 
 drop view if exists open_po_history cascade;
 
+drop table if exists agent_activity_log cascade;
+drop table if exists agent_runs cascade;
 drop table if exists audit_log cascade;
 drop table if exists transfer_requests cascade;
 drop table if exists events cascade;
@@ -340,6 +342,52 @@ create table audit_log (
 );
 
 -- ------------------------------------------------------------
+-- Layer 7: Autonomous agent runs & activity
+-- ------------------------------------------------------------
+
+create table agent_runs (
+  id                  bigserial primary key,
+  trigger_source      varchar(30)  not null,
+  actor               varchar(100) not null,
+  status              varchar(20)  not null default 'PENDING',
+  scan_params         jsonb,
+  events_scanned      integer      not null default 0,
+  events_analyzed     integer      not null default 0,
+  analysis_failures   integer      not null default 0,
+  flagged_for_review  integer      not null default 0,
+  monitored_count     integer      not null default 0,
+  skipped_reason      text,
+  error_message       text,
+  created_at          timestamptz  not null default now(),
+  started_at          timestamptz,
+  completed_at        timestamptz,
+  constraint agent_runs_status_check
+    check (status in ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'SKIPPED')),
+  constraint agent_runs_trigger_source_check
+    check (trigger_source in ('manual', 'scheduled')),
+  constraint agent_runs_events_scanned_nonnegative
+    check (events_scanned >= 0),
+  constraint agent_runs_events_analyzed_nonnegative
+    check (events_analyzed >= 0),
+  constraint agent_runs_analysis_failures_nonnegative
+    check (analysis_failures >= 0),
+  constraint agent_runs_flagged_for_review_nonnegative
+    check (flagged_for_review >= 0),
+  constraint agent_runs_monitored_count_nonnegative
+    check (monitored_count >= 0)
+);
+
+create table agent_activity_log (
+  id            bigserial primary key,
+  run_id         bigint       not null references agent_runs(id) on delete cascade,
+  event_id       bigint       references events(id) on delete set null,
+  action_type    varchar(50)  not null,
+  message        text         not null,
+  metadata       jsonb,
+  created_at     timestamptz  not null default now()
+);
+
+-- ------------------------------------------------------------
 -- Functions
 -- ------------------------------------------------------------
 
@@ -482,6 +530,18 @@ create index idx_transfers_event
 
 create index idx_audit_entity
   on audit_log (entity_id, entity_type);
+
+create index idx_agent_runs_created_at
+  on agent_runs (created_at desc);
+
+create index idx_agent_runs_status
+  on agent_runs (status);
+
+create index idx_agent_activity_run
+  on agent_activity_log (run_id, created_at desc);
+
+create index idx_agent_activity_event
+  on agent_activity_log (event_id, created_at desc);
 
 -- ------------------------------------------------------------
 -- Seed data

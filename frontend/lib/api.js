@@ -54,6 +54,10 @@ export function analyzeEvent(eventId) {
   return apiFetch(`/agent/analyze/${eventId}`, { method: 'POST' })
 }
 
+export function runAgent(payload = {}) {
+  return apiFetch('/agent/run', { method: 'POST', body: payload })
+}
+
 export function createTransferRequest(payload) {
   return apiFetch('/transfer-requests', { method: 'POST', body: payload })
 }
@@ -90,4 +94,23 @@ export function getInventoryHealth(params = {}) {
 
 export function getComparison() {
   return apiFetch('/comparison')
+}
+
+export function getLatestAgentRun() {
+  return apiFetch('/agent/runs/latest')
+}
+
+export function getAgentRun(runId) {
+  return apiFetch(`/agent/runs/${runId}`)
+}
+
+export function getAgentActivity(params = {}) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      search.set(key, value)
+    }
+  })
+  const suffix = search.toString() ? `?${search.toString()}` : ''
+  return apiFetch(`/agent/activity${suffix}`)
 }

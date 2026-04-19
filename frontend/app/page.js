@@ -2,12 +2,12 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowRight, Search } from 'lucide-react'
 import Nav from '../components/nav'
 import { ActionText, DCBadge, RiskPill, StateBadge } from '../components/badges'
-import { getEvents } from '../lib/api'
-import { fmtDate, fmtMoney, supplyColor } from '../lib/format'
+import { getEvents, getLatestAgentRun, runAgent } from '../lib/api'
+import { fmtDate, fmtDateTime, fmtMoney, supplyColor } from '../lib/format'
 
 export default function DashboardPage() {
   const router = useRouter()
@@ -16,28 +16,45 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
   const [stateFilter, setStateFilter] = useState('ALL')
+  const [agentStatus, setAgentStatus] = useState(null)
+  const [agentError, setAgentError] = useState('')
+  const [isTriggeringAgent, setIsTriggeringAgent] = useState(false)
 
-  useEffect(() => {
-    let cancelled = false
-
-    async function load() {
-      setIsLoading(true)
-      setError('')
-      try {
-        const data = await getEvents()
-        if (!cancelled) setEvents(Array.isArray(data) ? data : [])
-      } catch (err) {
-        if (!cancelled) setError(err.message || 'Failed to load events.')
-      } finally {
-        if (!cancelled) setIsLoading(false)
-      }
-    }
-
-    load()
-    return () => {
-      cancelled = true
+  const loadEvents = useCallback(async (showLoading = false) => {
+    if (showLoading) setIsLoading(true)
+    setError('')
+    try {
+      const data = await getEvents()
+      setEvents(Array.isArray(data) ? data : [])
+    } catch (err) {
+      setError(err.message || 'Failed to load events.')
+    } finally {
+      if (showLoading) setIsLoading(false)
     }
   }, [])
+
+  const loadAgentStatus = useCallback(async () => {
+    try {
+      const data = await getLatestAgentRun()
+      setAgentStatus(data)
+      setAgentError('')
+    } catch (err) {
+      setAgentError(err.message || 'Failed to load autonomous agent status.')
+    }
+  }, [])
+
+  useEffect(() => {
+    void Promise.all([loadEvents(true), loadAgentStatus()])
+  }, [loadEvents, loadAgentStatus])
+
+  const latestRunStatus = agentStatus?.run?.status || ''
+  useEffect(() => {
+    if (!['PENDING', 'RUNNING'].includes(latestRunStatus)) return
+    const timer = setTimeout(() => {
+      void Promise.all([loadEvents(false), loadAgentStatus()])
+    }, 3000)
+    return () => clearTimeout(timer)
+  }, [latestRunStatus, loadAgentStatus, loadEvents])
 
   const hero = useMemo(() => {
     const totalPenalty = events.reduce((sum, event) => sum + Number(event.expected_penalty_cost || 0), 0)
@@ -79,6 +96,24 @@ export default function DashboardPage() {
 
   const openEvent = (eventId) => router.push(`/events/${eventId}`)
 
+  async function handleRunAgent() {
+    setIsTriggeringAgent(true)
+    setAgentError('')
+    try {
+      const queued = await runAgent()
+      setAgentStatus((current) => ({
+        ...(current || { next_run_at: null, interval_hours: 6, scheduler_running: false }),
+        run: queued.run,
+        activities: queued.activities,
+      }))
+      await loadAgentStatus()
+    } catch (err) {
+      setAgentError(err.message || 'Failed to start autonomous agent run.')
+    } finally {
+      setIsTriggeringAgent(false)
+    }
+  }
+
   return (
     <div className="min-h-screen">
       <Nav />
@@ -113,6 +148,98 @@ export default function DashboardPage() {
               <Pill color="#EAB308" label={`${hero.medium} medium`} />
               <Pill color="#22C55E" label={`${hero.low} low`} />
             </div>
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.18em] text-[hsl(var(--app-text-muted))]">
+                Autonomous agent
+              </div>
+              <h2 className="mt-2 text-xl font-medium text-[hsl(var(--app-text-strong))]">
+                Scheduled review-only triage
+              </h2>
+              <p className="mt-2 max-w-2xl text-sm text-[hsl(var(--app-text-soft))]">
+                The agent runs the full scan/analyze pipeline automatically, prioritizes by penalty exposure, and decides whether each event should be monitored or flagged for human review.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <RunStatusPill status={agentStatus?.run?.status || 'IDLE'} />
+              <button
+                type="button"
+                onClick={handleRunAgent}
+                disabled={isTriggeringAgent || ['PENDING', 'RUNNING'].includes(agentStatus?.run?.status)}
+                className="mono rounded-md bg-[#F59E0B] px-4 py-2 text-xs font-medium tracking-widest text-neutral-950 hover:bg-[#F59E0B]/90 disabled:opacity-40"
+              >
+                {isTriggeringAgent ? 'STARTING…' : ['PENDING', 'RUNNING'].includes(agentStatus?.run?.status) ? 'RUNNING…' : 'RUN AGENT NOW'}
+              </button>
+            </div>
+          </div>
+          {agentError && (
+            <div className="mt-4 rounded-md border border-red-900/50 bg-red-950/20 px-4 py-3 text-sm text-red-300">
+              {agentError}
+            </div>
+          )}
+          <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-4">
+            <MetricCard
+              label="Last run"
+              value={agentStatus?.run ? fmtDateTime(agentStatus.run.completed_at || agentStatus.run.created_at) : 'No runs yet'}
+            />
+            <MetricCard
+              label="Next run"
+              value={
+                agentStatus?.scheduler_running
+                  ? fmtDateTime(agentStatus?.next_run_at)
+                  : 'Scheduler idle'
+              }
+            />
+            <MetricCard
+              label="Flagged"
+              value={agentStatus?.run ? String(agentStatus.run.flagged_for_review) : '0'}
+            />
+            <MetricCard
+              label="Monitored"
+              value={agentStatus?.run ? String(agentStatus.run.monitored_count) : '0'}
+            />
+          </div>
+        </section>
+
+        <section className="mt-6 rounded-md border border-border bg-[hsl(var(--app-panel))] transition-colors">
+          <div className="flex items-center justify-between border-b border-border bg-[hsl(var(--app-panel-muted))] px-5 py-3">
+            <div className="text-[10px] uppercase tracking-[0.18em] text-[hsl(var(--app-text-muted))]">
+              Agent activity feed
+            </div>
+            <div className="mono text-xs text-[hsl(var(--app-text-muted))]">
+              {agentStatus?.interval_hours ? `every ${agentStatus.interval_hours}h` : 'manual only'}
+            </div>
+          </div>
+          <div className="divide-y divide-border">
+            {(agentStatus?.activities || []).length === 0 ? (
+              <div className="px-5 py-8 text-sm text-[hsl(var(--app-text-soft))]">
+                No agent activity has been recorded yet.
+              </div>
+            ) : (
+              (agentStatus.activities || []).map((entry) => (
+                <div key={entry.id || `${entry.action_type}-${entry.created_at}`} className="px-5 py-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <div className="text-sm text-[hsl(var(--app-text-strong))]">{entry.message}</div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-[hsl(var(--app-text-muted))]">
+                        <span>{entry.action_type.replaceAll('_', ' ')}</span>
+                        {entry.metadata?.sku_id ? <span>{entry.metadata.sku_id}</span> : null}
+                        {entry.metadata?.source_dc && entry.metadata?.dest_dc ? (
+                          <span>{entry.metadata.source_dc} to {entry.metadata.dest_dc}</span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="mono text-xs text-[hsl(var(--app-text-muted))]">
+                      {fmtDateTime(entry.created_at)}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </section>
 
@@ -248,6 +375,32 @@ function Pill({ color, label }) {
     >
       <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: color }} />
       {label.toUpperCase()}
+    </span>
+  )
+}
+
+function MetricCard({ label, value }) {
+  return (
+    <div className="rounded-md border border-border bg-[hsl(var(--app-panel-muted))] p-4 transition-colors">
+      <div className="text-[11px] uppercase tracking-[0.18em] text-[hsl(var(--app-text-muted))]">{label}</div>
+      <div className="mono mt-2 text-lg text-[hsl(var(--app-text-strong))]">{value}</div>
+    </div>
+  )
+}
+
+function RunStatusPill({ status }) {
+  const tone = {
+    RUNNING: 'bg-blue-500/10 text-blue-300 ring-blue-500/30',
+    PENDING: 'bg-amber-500/10 text-amber-300 ring-amber-500/30',
+    SUCCEEDED: 'bg-[#22C55E]/10 text-[#22C55E] ring-[#22C55E]/30',
+    FAILED: 'bg-[#EF4444]/12 text-[#EF4444] ring-[#EF4444]/30',
+    SKIPPED: 'bg-secondary text-[hsl(var(--app-text-soft))] ring-border',
+    IDLE: 'bg-secondary text-[hsl(var(--app-text-soft))] ring-border',
+  }[status] || 'bg-secondary text-[hsl(var(--app-text-soft))] ring-border'
+
+  return (
+    <span className={`mono inline-flex rounded-full px-3 py-1 text-[11px] tracking-widest ring-1 ring-inset ${tone}`}>
+      {status}
     </span>
   )
 }

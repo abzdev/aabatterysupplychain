@@ -158,6 +158,47 @@ class ComparisonResponse(BaseModel):
     rows: list[ComparisonEventRow]
 
 
+class AgentActivityEntry(BaseModel):
+    id: int | None = None
+    run_id: int
+    event_id: int | None = None
+    action_type: str
+    message: str
+    metadata: dict[str, Any] | None = None
+    created_at: datetime | None = None
+
+
+class AgentRunResponse(BaseModel):
+    id: int
+    trigger_source: str
+    actor: str
+    status: str
+    scan_params: dict[str, Any] | None = None
+    events_scanned: int = 0
+    events_analyzed: int = 0
+    analysis_failures: int = 0
+    flagged_for_review: int = 0
+    monitored_count: int = 0
+    skipped_reason: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class AgentRunDetailResponse(BaseModel):
+    run: AgentRunResponse
+    activities: list[AgentActivityEntry]
+
+
+class AgentLatestRunResponse(BaseModel):
+    run: AgentRunResponse | None = None
+    activities: list[AgentActivityEntry]
+    next_run_at: datetime | None = None
+    interval_hours: int
+    scheduler_running: bool
+
+
 class ScanParams(BaseModel):
     max_dos: float = 60.0
     demand_window_days: int = 30

@@ -14,6 +14,17 @@ export const fmtDate = (iso) => {
   })
 }
 
+export const fmtDateTime = (iso) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+}
+
 export const daysBetween = (a, b) => {
   const ms = new Date(b).getTime() - new Date(a).getTime()
   return Math.round(ms / (1000 * 60 * 60 * 24))

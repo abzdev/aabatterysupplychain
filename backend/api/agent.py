@@ -1,13 +1,32 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from schemas.events import AgentRunDetailResponse, ScanParams
+from services.agent_runner import launch_agent_run
 from services.orchestrator import analyze_event
 from services.workflow import WorkflowError, actor_from_headers, require_supabase_config
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+@router.post("/run", response_model=AgentRunDetailResponse)
+def post_run_agent(
+    request: Request,
+    params: ScanParams | None = Body(default=None),
+) -> dict:
+    try:
+        require_supabase_config()
+    except WorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    return launch_agent_run(
+        trigger_source="manual",
+        actor=actor_from_headers(request.headers, default="agent:manual"),
+        params=params,
+    )
 
 
 @router.post("/analyze/{event_id}")

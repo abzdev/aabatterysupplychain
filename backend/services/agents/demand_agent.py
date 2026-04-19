@@ -71,6 +71,30 @@ def _build_projection(available: float, daily_demand: float, horizon_days: int) 
     return projection
 
 
+def _sales_units(row: dict[str, Any]) -> float:
+    qty_base_uom = pd.to_numeric(row.get("qty_base_uom"), errors="coerce")
+    if pd.notna(qty_base_uom) and float(qty_base_uom) > 0:
+        return float(qty_base_uom)
+    quantity_adj = pd.to_numeric(row.get("quantity_adj"), errors="coerce")
+    if pd.notna(quantity_adj):
+        return float(quantity_adj)
+    return 0.0
+
+
+def _resolved_demand_total(
+    recent_total: float | None,
+    fallback_total: float | None,
+    *,
+    demand_window_days: int,
+    fallback_window_days: int,
+) -> float:
+    if recent_total is not None and recent_total > 0:
+        return float(recent_total)
+    if fallback_total is not None and fallback_total > 0 and fallback_window_days > 0:
+        return float(fallback_total) * (float(demand_window_days) / float(fallback_window_days))
+    return 0.0
+
+
 def _choose_dest_dc(
     sku_id: str,
     source_dc: str,
@@ -151,7 +175,7 @@ class DemandAgent:
         while True:
             response = (
                 self.client.table("sales_history")
-                .select("sku_id,dc,doc_date,quantity_adj")
+                .select("sku_id,dc,doc_date,quantity_adj,qty_base_uom")
                 .gte("doc_date", start.isoformat())
                 .lte("doc_date", end.isoformat())
                 .range(offset, offset + self.config.page_size - 1)
@@ -168,24 +192,48 @@ class DemandAgent:
             return df
         df["sku_id"] = df["sku_id"].astype("string").str.strip()
         df["dc"] = df["dc"].astype("string").str.strip()
-        df["quantity_adj"] = pd.to_numeric(df["quantity_adj"], errors="coerce").fillna(0)
+        df["quantity_adj"] = pd.to_numeric(df["quantity_adj"], errors="coerce")
+        df["qty_base_uom"] = pd.to_numeric(df["qty_base_uom"], errors="coerce")
         df["doc_date"] = df["doc_date"].map(_parse_doc_date)
         df = df[df["sku_id"].notna() & df["dc"].isin(ALL_DCS) & df["doc_date"].notna()].copy()
+        df["units"] = df.apply(lambda row: _sales_units(row), axis=1)
+        df = df[df["units"] > 0].copy()
         return df
 
     def build_events(self) -> pd.DataFrame:
         as_of = self._latest_snapshot_date()
-        window_start = as_of - timedelta(days=self.config.demand_window_days - 1)
+        recent_window_start = as_of - timedelta(days=self.config.demand_window_days - 1)
+        fallback_window_days = max(365, self.config.demand_window_days)
+        fallback_window_start = as_of - timedelta(days=fallback_window_days - 1)
 
         inventory = self._load_inventory(as_of)
-        sales = self._load_sales_window(window_start, as_of)
+        sales = self._load_sales_window(fallback_window_start, as_of)
 
         if not sales.empty:
-            demand = (
-                sales.groupby(["sku_id", "dc"], as_index=False)["quantity_adj"]
+            recent_sales = sales[sales["doc_date"] >= pd.Timestamp(recent_window_start)].copy()
+            recent_demand = (
+                recent_sales.groupby(["sku_id", "dc"], as_index=False)["units"]
                 .sum()
-                .rename(columns={"quantity_adj": "demand_30d"})
+                .rename(columns={"units": "recent_demand_total"})
             )
+            fallback_demand = (
+                sales.groupby(["sku_id", "dc"], as_index=False)["units"]
+                .sum()
+                .rename(columns={"units": "fallback_demand_total"})
+            )
+            demand = fallback_demand.merge(recent_demand, on=["sku_id", "dc"], how="outer")
+            demand["recent_demand_total"] = demand["recent_demand_total"].fillna(0)
+            demand["fallback_demand_total"] = demand["fallback_demand_total"].fillna(0)
+            demand["demand_30d"] = demand.apply(
+                lambda row: _resolved_demand_total(
+                    row["recent_demand_total"],
+                    row["fallback_demand_total"],
+                    demand_window_days=self.config.demand_window_days,
+                    fallback_window_days=fallback_window_days,
+                ),
+                axis=1,
+            )
+            demand = demand[["sku_id", "dc", "demand_30d"]]
         else:
             demand = pd.DataFrame(columns=["sku_id", "dc", "demand_30d"])
 
