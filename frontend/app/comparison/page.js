@@ -51,7 +51,7 @@ export default function ComparisonPage() {
                 Manual vs system-assisted decisions
               </h1>
               <p className="mt-2 max-w-2xl text-sm text-[hsl(var(--app-text-soft))]">
-                Portfolio-level comparison of modeled manual handling versus the current assisted workflow.
+                Portfolio-level comparison of manual handling risk versus the current transfer-first assisted workflow.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -70,10 +70,10 @@ export default function ComparisonPage() {
               {summary ? fmtMoney(summary.manual_baseline_cost) : '—'}
             </div>
             <div className="mt-2 text-sm text-[hsl(var(--app-text-soft))]">
-              Historical operational chargeback baseline for the detected SKUs and destination DCs.
+              Uses the higher of observed chargebacks or modeled wait exposure across the detected events.
             </div>
             <div className="mt-2 text-xs text-[hsl(var(--app-text-muted))]">
-              Conservative view only: excludes hidden manual costs like emergency freight, OTIF degradation, and dispute labor.
+              Still conservative: excludes hidden manual costs like emergency freight, OTIF degradation, and dispute labor.
             </div>
           </div>
           <div className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors">
@@ -82,7 +82,10 @@ export default function ComparisonPage() {
               {summary ? fmtMoney(summary.system_assisted_cost) : '—'}
             </div>
             <div className="mt-2 text-sm text-[hsl(var(--app-text-soft))]">
-              Uses the latest transfer request estimate when one exists, otherwise the active recommendation.
+              Prioritizes the latest active transfer request when a transfer is needed; otherwise uses the current recommendation.
+            </div>
+            <div className="mt-2 text-xs text-[hsl(var(--app-text-muted))]">
+              Transfer request cost wins whenever that path is already in motion.
             </div>
           </div>
           <div className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors" style={{ boxShadow: 'inset 3px 0 0 0 #F59E0B' }}>
@@ -92,6 +95,9 @@ export default function ComparisonPage() {
             </div>
             <div className="mt-2 text-sm text-[hsl(var(--app-text-soft))]">
               Positive values mean the assisted workflow is modeling lower portfolio cost than the manual baseline.
+            </div>
+            <div className="mt-2 text-xs text-[hsl(var(--app-text-muted))]">
+              Negative values mean the current assisted path is more expensive than manual handling.
             </div>
           </div>
         </section>
@@ -164,8 +170,20 @@ export default function ComparisonPage() {
                       <div className="flex flex-wrap items-center gap-2">
                         <ActionText action={row.system_action} />
                         {row.request_state ? <StateBadge state={row.request_state} /> : null}
+                        {row.request_state && row.system_action === 'TRANSFER' ? (
+                          <span className="mono inline-flex items-center rounded-full bg-[#F59E0B]/12 px-2 py-0.5 text-[10px] tracking-widest text-[#F59E0B] ring-1 ring-inset ring-[#F59E0B]/30">
+                            TRANSFER PRIORITY
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mono mt-2 text-sm text-[hsl(var(--app-text-strong))]">{fmtMoney(row.system_cost)}</div>
+                      <div className="mt-1 text-xs text-[hsl(var(--app-text-muted))]">
+                        {row.request_state && row.system_action === 'TRANSFER'
+                          ? 'Active transfer request is driving the assisted estimate.'
+                          : row.system_action === 'TRANSFER'
+                            ? 'No active request yet; using the current transfer recommendation.'
+                            : 'Transfer is not the lower-cost assisted path for this event.'}
+                      </div>
                     </td>
                     <td className={`mono px-5 py-4 text-sm ${row.delta_vs_manual >= 0 ? 'text-[#22C55E]' : 'text-[#EF4444]'}`}>
                       {row.delta_vs_manual >= 0 ? '+' : '-'}

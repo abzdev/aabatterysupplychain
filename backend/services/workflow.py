@@ -710,7 +710,9 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
     approval_hours: list[float] = []
     for event in events:
         request = request_by_event.get(event["id"])
-        manual_cost = float(manual_cost_by_event.get(event["id"]) or 0)
+        historical_manual_cost = float(manual_cost_by_event.get(event["id"]) or 0)
+        modeled_wait_cost = float(event.get("cost_wait") or event.get("expected_penalty_cost") or 0)
+        manual_cost = max(historical_manual_cost, modeled_wait_cost)
         if request and request["state"] in {"PENDING_APPROVAL", "APPROVED", "EXECUTED"}:
             system_action = "TRANSFER"
             system_cost = float(request.get("estimated_cost") or event.get("cost_transfer") or 0)
@@ -743,7 +745,11 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
                 "system_cost": system_cost,
                 "delta_vs_manual": manual_cost - system_cost,
                 "request_state": request.get("state") if request else None,
-                "manual_cost_basis": manual_basis_by_event.get(event["id"]),
+                "manual_cost_basis": (
+                    "modeled_penalty_floor"
+                    if modeled_wait_cost >= historical_manual_cost
+                    else manual_basis_by_event.get(event["id"])
+                ),
             }
         )
 
@@ -769,8 +775,8 @@ def get_manual_vs_system_comparison(client: Client) -> dict[str, Any]:
         "ai_coverage_rate": (ai_covered / event_count) if event_count else None,
     }
     assumptions = [
-        "Manual baseline is derived from actual operational chargeback history for the detected SKUs and destination DCs, with fallbacks to SKU-, DC-, or portfolio-level operational chargeback averages when direct matches are sparse.",
-        "System-assisted cost uses the latest transfer request estimate when a request exists; otherwise it uses the current recommended action on the event.",
+        "Manual baseline uses the higher of actual operational chargeback history and the event's modeled wait-cost exposure, so sparse history cannot understate current manual risk.",
+        "System-assisted cost prioritizes the latest active transfer request whenever a transfer is already in motion; otherwise it uses the event's current recommended action.",
         "The manual baseline is conservative: it excludes hidden manual-process costs such as emergency split-ship freight, OTIF score degradation, and labor spent disputing chargebacks later.",
         "Manual approval time is shown as a 24-hour operating assumption because the current schema does not track a true manual workflow baseline.",
     ]
