@@ -21,7 +21,7 @@ from postgrest.base_request_builder import ReturnMethod
 from supabase import Client, create_client
 
 from .demand_agent import DemandAgent, DemandAgentConfig
-from .supply_agent import SupplyEventInput, SupabasePORepository, evaluate_supply_for_event
+from .supply_agent import SupplyEventInput, evaluate_supply_for_event
 
 load_dotenv()
 
@@ -107,7 +107,7 @@ class ImbalanceAgent:
     def __init__(self, client: Client, config: ImbalanceAgentConfig | None = None) -> None:
         self.client = client
         self.config = config or ImbalanceAgentConfig()
-        self.po_repository = SupabasePORepository(client)
+        self.po_repository = client
 
     def _latest_snapshot_date(self) -> date:
         response = self.client.table("inventory_snapshots").select("snapshot_date").order(
