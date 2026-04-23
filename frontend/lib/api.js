@@ -92,10 +92,6 @@ export function getInventoryHealth(params = {}) {
   return apiFetch(`/inventory-health${suffix}`)
 }
 
-export function getComparison() {
-  return apiFetch('/comparison')
-}
-
 export function getLatestAgentRun() {
   return apiFetch('/agent/runs/latest')
 }

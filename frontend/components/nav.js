@@ -48,7 +48,6 @@ export default function Nav() {
         <nav className="flex items-center gap-7">
           <Link2 href="/">Dashboard</Link2>
           <Link2 href="/inventory">Inventory</Link2>
-          <Link2 href="/comparison">Comparison</Link2>
           <Link2 href="/approvals">Approvals</Link2>
         </nav>
         <div className="flex items-center gap-3">

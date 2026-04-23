@@ -1,11 +1,13 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState } from 'react'
 import Nav from '../../components/nav'
 import { ActionText, DCBadge, RiskPill } from '../../components/badges'
 import { getInventoryHealth } from '../../lib/api'
 import { fmtDate, fmtUnits, supplyColor } from '../../lib/format'
+
+const ROWS_PER_PAGE = 100
 
 export default function InventoryPage() {
   const [payload, setPayload] = useState(null)
@@ -14,6 +16,8 @@ export default function InventoryPage() {
   const [query, setQuery] = useState('')
   const [dcFilter, setDcFilter] = useState('ALL')
   const [statusFilter, setStatusFilter] = useState('ALL')
+  const [page, setPage] = useState(1)
+  const deferredQuery = useDeferredValue(query)
 
   useEffect(() => {
     let cancelled = false
@@ -41,7 +45,7 @@ export default function InventoryPage() {
   const summary = payload?.summary
 
   const filteredItems = useMemo(() => {
-    const search = query.trim().toLowerCase()
+    const search = deferredQuery.trim().toLowerCase()
     return items.filter((item) => {
       const matchesSearch =
         !search ||
@@ -53,13 +57,25 @@ export default function InventoryPage() {
       const matchesStatus = statusFilter === 'ALL' || item.health_status === statusFilter
       return matchesSearch && matchesDc && matchesStatus
     })
-  }, [items, query, dcFilter, statusFilter])
+  }, [items, deferredQuery, dcFilter, statusFilter])
+
+  useEffect(() => {
+    setPage(1)
+  }, [deferredQuery, dcFilter, statusFilter])
 
   const dcOptions = useMemo(() => ['ALL', ...new Set(items.map((item) => item.dc).filter(Boolean))], [items])
   const statusOptions = useMemo(
     () => ['ALL', ...new Set(items.map((item) => item.health_status).filter(Boolean))],
     [items]
   )
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / ROWS_PER_PAGE))
+  const currentPage = Math.min(page, totalPages)
+  const visibleItems = useMemo(() => {
+    const start = (currentPage - 1) * ROWS_PER_PAGE
+    return filteredItems.slice(start, start + ROWS_PER_PAGE)
+  }, [filteredItems, currentPage])
+  const visibleRangeStart = filteredItems.length === 0 ? 0 : (currentPage - 1) * ROWS_PER_PAGE + 1
+  const visibleRangeEnd = Math.min(filteredItems.length, currentPage * ROWS_PER_PAGE)
 
   return (
     <div className="min-h-screen">
@@ -123,11 +139,40 @@ export default function InventoryPage() {
                 ))}
               </select>
               <div className="mono text-xs text-[hsl(var(--app-text-muted))]">
-                Showing {filteredItems.length} of {items.length}
+                Showing {visibleRangeStart}-{visibleRangeEnd} of {filteredItems.length} filtered rows
               </div>
             </div>
           </div>
         </section>
+
+        {!isLoading && !error && filteredItems.length > ROWS_PER_PAGE && (
+          <section className="mt-4 flex flex-col gap-3 rounded-md border border-border bg-[hsl(var(--app-panel))] p-4 transition-colors md:flex-row md:items-center md:justify-between">
+            <div className="text-sm text-[hsl(var(--app-text-soft))]">
+              Rendering {ROWS_PER_PAGE} rows per page to keep the table responsive on large snapshots.
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.max(1, value - 1))}
+                disabled={currentPage === 1}
+                className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors hover:border-[#F59E0B]/40 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Previous
+              </button>
+              <div className="mono text-xs text-[hsl(var(--app-text-muted))]">
+                Page {currentPage} of {totalPages}
+              </div>
+              <button
+                type="button"
+                onClick={() => setPage((value) => Math.min(totalPages, value + 1))}
+                disabled={currentPage === totalPages}
+                className="rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground transition-colors hover:border-[#F59E0B]/40 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Next
+              </button>
+            </div>
+          </section>
+        )}
 
         <section className="mt-6 overflow-hidden rounded-md border border-border bg-[hsl(var(--app-panel))] transition-colors">
           <table className="w-full">
@@ -161,7 +206,7 @@ export default function InventoryPage() {
               )}
               {!isLoading &&
                 !error &&
-                filteredItems.map((item) => (
+                visibleItems.map((item) => (
                   <tr key={`${item.sku_id}-${item.dc}`} className="border-b border-border last:border-0">
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-3">
