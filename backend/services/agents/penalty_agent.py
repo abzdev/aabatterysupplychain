@@ -269,10 +269,10 @@ class PenaltyAgent:
         penalty_history: pd.DataFrame,
         *,
         sku_id: str,
-        source_dc: str,
+        dest_dc: str,
         global_fallback: float,
     ) -> float:
-        exact = penalty_history[(penalty_history["sku_id"] == sku_id) & (penalty_history["dc"] == source_dc)]
+        exact = penalty_history[(penalty_history["sku_id"] == sku_id) & (penalty_history["dc"] == dest_dc)]
         if not exact.empty:
             return float(exact["extended_price"].mean())
 
@@ -280,7 +280,7 @@ class PenaltyAgent:
         if not sku_only.empty:
             return float(sku_only["extended_price"].mean())
 
-        dc_only = penalty_history[penalty_history["dc"] == source_dc]
+        dc_only = penalty_history[penalty_history["dc"] == dest_dc]
         if not dc_only.empty:
             return float(dc_only["extended_price"].mean())
 
@@ -308,7 +308,8 @@ class PenaltyAgent:
         for event in events.itertuples(index=False):
             sku_id = event.sku_id
             source_dc = event.source_dc
-            sales_subset = sales[(sales["sku_id"] == sku_id) & (sales["dc"] == source_dc)].copy()
+            dest_dc = event.dest_dc
+            sales_subset = sales[(sales["sku_id"] == sku_id) & (sales["dc"] == dest_dc)].copy()
 
             customer_weights = (
                 sales_subset.groupby("customer_number").size() if not sales_subset.empty else pd.Series(dtype="int64")
@@ -317,13 +318,13 @@ class PenaltyAgent:
                 sales_subset.groupby("customer_type").size() if not sales_subset.empty else pd.Series(dtype="int64")
             )
 
-            relevant_chargebacks = chargebacks[chargebacks["dc"] == source_dc].copy()
+            relevant_chargebacks = chargebacks[chargebacks["dc"] == dest_dc].copy()
             if not customer_weights.empty:
                 relevant_chargebacks = relevant_chargebacks[
                     relevant_chargebacks["customer_number"].isin(customer_weights.index)
                 ].copy()
             if relevant_chargebacks.empty:
-                relevant_chargebacks = chargebacks[chargebacks["dc"] == source_dc].copy()
+                relevant_chargebacks = chargebacks[chargebacks["dc"] == dest_dc].copy()
             if relevant_chargebacks.empty:
                 relevant_chargebacks = chargebacks.copy()
 
@@ -339,14 +340,14 @@ class PenaltyAgent:
             customer_penalty_index = _weighted_lookup_average(
                 customer_lookup, customer_weights, fallback=global_penalty_avg
             )
-            dc_penalty_index = float(dc_lookup.get(source_dc, global_penalty_avg))
+            dc_penalty_index = float(dc_lookup.get(dest_dc, global_penalty_avg))
             penalty_type_index = _weighted_lookup_average(
                 penalty_type_lookup, penalty_type_weights, fallback=global_penalty_avg
             )
             expected_penalty_cost = self._expected_penalty_cost(
                 penalty_history,
                 sku_id=sku_id,
-                source_dc=source_dc,
+                dest_dc=dest_dc,
                 global_fallback=global_penalty_avg,
             )
             penalty_risk_score = self._risk_score_from_indexes(
