@@ -59,6 +59,14 @@ export default function EventPage() {
   const latestTransferRequest = event?.transfer_requests?.[event.transfer_requests.length - 1] || null
   const canCreateTransfer = !latestTransferRequest && event?.recommended_action === 'TRANSFER'
   const showAnalyzeAction = Boolean(event)
+  const normalizedRecommendation =
+    event?.recommended_action === 'TRANSFER'
+      ? 'TRANSFER'
+      : event?.recommended_action === 'WAIT' || event?.recommended_action === 'MONITOR'
+        ? 'WAIT_MONITOR'
+        : null
+  const transferIsRecommended = normalizedRecommendation === 'TRANSFER'
+  const waitMonitorIsRecommended = normalizedRecommendation === 'WAIT_MONITOR'
   const tradeoff = useMemo(() => {
     if (!event) return null
     const transferCost = Number(event.cost_transfer || 0)
@@ -304,10 +312,23 @@ export default function EventPage() {
         </section>
 
         <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors" style={{ boxShadow: 'inset 3px 0 0 0 #F59E0B' }}>
+          <div
+            className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors"
+            style={transferIsRecommended ? { boxShadow: 'inset 3px 0 0 0 #F59E0B' } : undefined}
+          >
             <div className="flex items-center justify-between">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-[#F59E0B]">Transfer now</div>
-              <StateBadge state={event.state} />
+              <div className={`text-[11px] uppercase tracking-[0.18em] ${transferIsRecommended ? 'text-[#F59E0B]' : 'text-[hsl(var(--app-text-soft))]'}`}>
+                Transfer now
+              </div>
+              {transferIsRecommended ? (
+                <span className="mono rounded-full bg-[#F59E0B]/10 px-2 py-0.5 text-[10px] tracking-widest text-[#F59E0B] ring-1 ring-inset ring-[#F59E0B]/30">
+                  RECOMMENDED
+                </span>
+              ) : (
+                <span className="mono rounded-full bg-secondary px-2 py-0.5 text-[10px] tracking-widest text-[hsl(var(--app-text-soft))]">
+                  ALTERNATIVE
+                </span>
+              )}
             </div>
             <div className="mono mt-3 text-4xl font-medium text-[hsl(var(--app-text-strong))]">
               {fmtMoney(event.cost_transfer)}
@@ -327,10 +348,23 @@ export default function EventPage() {
               <Row k="Recommended action" v={event.recommended_action || '—'} />
             </div>
           </div>
-          <div className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors">
+          <div
+            className="rounded-md border border-border bg-[hsl(var(--app-panel))] p-6 transition-colors"
+            style={waitMonitorIsRecommended ? { boxShadow: 'inset 3px 0 0 0 #F59E0B' } : undefined}
+          >
             <div className="flex items-center justify-between">
-              <div className="text-[11px] uppercase tracking-[0.18em] text-[hsl(var(--app-text-soft))]">Wait / monitor</div>
-              <span className="mono rounded-full bg-secondary px-2 py-0.5 text-[10px] tracking-widest text-[hsl(var(--app-text-soft))]">ALTERNATIVE</span>
+              <div className={`text-[11px] uppercase tracking-[0.18em] ${waitMonitorIsRecommended ? 'text-[#F59E0B]' : 'text-[hsl(var(--app-text-soft))]'}`}>
+                Wait / monitor
+              </div>
+              {waitMonitorIsRecommended ? (
+                <span className="mono rounded-full bg-[#F59E0B]/10 px-2 py-0.5 text-[10px] tracking-widest text-[#F59E0B] ring-1 ring-inset ring-[#F59E0B]/30">
+                  RECOMMENDED
+                </span>
+              ) : (
+                <span className="mono rounded-full bg-secondary px-2 py-0.5 text-[10px] tracking-widest text-[hsl(var(--app-text-soft))]">
+                  ALTERNATIVE
+                </span>
+              )}
             </div>
             <div className="mono mt-3 text-4xl font-medium text-[hsl(var(--app-text-soft))]">
               {fmtMoney(event.cost_wait)}
@@ -447,7 +481,7 @@ export default function EventPage() {
                 ? `Transfer request #${latestTransferRequest.id} is ${latestTransferRequest.state}.`
                 : canCreateTransfer
                   ? 'Adjust the transfer quantity or re-run analysis without leaving the page.'
-                  : 'Re-run analysis anytime. Transfer creation unlocks when the recommendation is TRANSFER.'}
+                  : `Current recommendation is ${event.recommended_action || 'unavailable'}. Re-run analysis anytime.`}
             </div>
           </div>
           <div className="flex flex-col gap-3 md:flex-row md:items-center">
@@ -484,7 +518,7 @@ export default function EventPage() {
                 >
                   VIEW APPROVALS
                 </button>
-              ) : (
+              ) : canCreateTransfer ? (
                 <button
                   onClick={handleCreateTransferRequest}
                   disabled={submittingRequest || !requestQty || Number(requestQty) <= 0 || !canCreateTransfer}
@@ -492,6 +526,10 @@ export default function EventPage() {
                 >
                   {submittingRequest ? 'CREATING…' : 'CREATE TRANSFER REQUEST'}
                 </button>
+              ) : (
+                <span className="mono rounded-md border border-border bg-[hsl(var(--app-panel))] px-4 py-2 text-xs tracking-widest text-[hsl(var(--app-text-soft))]">
+                  {event.recommended_action || 'NO RECOMMENDATION'}
+                </span>
               )}
             </div>
           </div>
